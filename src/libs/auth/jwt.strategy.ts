@@ -3,7 +3,6 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Injectable } from '@nestjs/common';
 import { UserService } from '../../domain/user/user.service';
 import * as dotenv from 'dotenv';
-import { validate } from 'class-validator';
 dotenv.config();
 
 @Injectable()
@@ -19,6 +18,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   async validate(payload: any) {
     return {
       id: payload.id,
+      isAdmin: payload.isAdmin,
     };
   }
 }

@@ -4,26 +4,26 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Connection, getConnection, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { User } from '@/entities/user.entity';
+import { Users } from '../../entities/users.entity';
 import * as bcrypt from 'bcrypt';
-import { CreateAuthDto } from '@/dto/user/create-auth.dto';
+import { CreateUserDto } from './dto/create-user.dto';
+import { StringToDate } from '../../libs/transformer';
 
 @Injectable()
 export class UserService {
   constructor(
-    private connection: Connection,
     private jwtService: JwtService,
 
-    @InjectRepository(User)
-    private userRepository: Repository<User>,
+    @InjectRepository(Users)
+    private userRepository: Repository<Users>,
   ) {}
 
-  async validateUser(email: string, password: string): Promise<any> {
+  async checkUser(email: string, password: string): Promise<Users> {
     const user = await this.userRepository.findOne({
       where: { email: email },
-      select: ['id', 'email', 'password'],
+      select: ['id', 'password', 'isAdmin'],
     });
 
     if (!user) {
@@ -31,21 +31,23 @@ export class UserService {
     }
 
     const result = await bcrypt.compare(password, user.password);
+    delete user.password;
+
     if (result) {
-      const { password, ...userWithoutPassword } = user;
-      return userWithoutPassword;
+      return user;
     } else {
       throw new BadRequestException('비밀번호가 일치하지 않습니다.');
     }
   }
 
-  async join(data: CreateAuthDto): Promise<any> {
+  async join(
+    data: CreateUserDto,
+  ): Promise<{ id: number; accessToken: string }> {
     const hashedPassword = await bcrypt.hash(data.password, 12);
 
     const email = await this.userRepository
       .createQueryBuilder('user')
       .where('user.email=:email', { email: data.email })
-      .andWhere('user.deletedAt IS NULL')
       .getOne();
 
     if (email) {
@@ -53,94 +55,63 @@ export class UserService {
     }
 
     try {
-      const user = new User();
+      const user = new Users();
       user.email = data.email;
       user.password = hashedPassword;
+      user.birth = StringToDate(data.birth);
 
       const join = await this.userRepository.save(user);
       const accessToken = await this.getAccessToken(join);
-      const refreshToken = await this.getRefreshToken(join);
-      const hashedRefreshToken = await bcrypt.hash(refreshToken, 12);
 
-      await this.setRefreshToken(join.id, hashedRefreshToken);
-
-      return { id: join.id, accessToken, refreshToken };
+      return { id: join.id, accessToken };
     } catch (e) {
-      throw new BadRequestException(e);
+      console.log(e);
+      throw new BadRequestException('회원가입 중 오류가 발생했습니다.');
     }
   }
 
   async getAccessToken(user: any) {
     const payload = {
       id: user.id,
-      email: user.email,
-      username: user.username,
+      isAdmin: user.isAdmin,
     };
+
     return this.jwtService.sign(payload, {
       secret: process.env.JWT_ACCESS_TOKEN_SECRET,
       expiresIn: `${process.env.JWT_ACCESS_TOKEN_EXPIRATION_TIME}s`,
     });
   }
-
-  async getRefreshToken(user: any) {
-    const payload = {
-      id: user.id,
-      email: user.email,
-      username: user.username,
-    };
-    return this.jwtService.sign(payload, {
-      secret: process.env.JWT_REFRESH_TOKEN_SECRET,
-      expiresIn: `${process.env.JWT_REFRESH_TOKEN_EXPIRATION_TIME}s`,
-    });
-  }
-
-  async setRefreshToken(id: number, refreshToken: string) {
-    await getConnection()
-      .createQueryBuilder()
-      .update(User)
-      .set({ refreshToken })
-      .where('id=:id', { id })
-      .execute();
-  }
-
-  async removeRefreshToken(id: number) {
-    await getConnection()
-      .createQueryBuilder()
-      .update(User)
-      .set({ refreshToken: null })
-      .where('id=:id', { id })
-      .execute();
-  }
-
   async login(user: any) {
     const accessToken = await this.getAccessToken(user);
-    const refreshToken = await this.getRefreshToken(user);
-    const hashedRefreshToken = await bcrypt.hash(refreshToken, 12);
-
-    await this.setRefreshToken(user.id, hashedRefreshToken);
 
     return {
       id: user.id,
       accessToken,
-      refreshToken,
     };
   }
 
-  async logout(user: any): Promise<boolean> {
-    await this.removeRefreshToken(user.id);
-    return true;
+  async validateUser(accessToken): Promise<Users> {
+    let decodedJwt: object;
+    try {
+      decodedJwt = await this.jwtService.verify(accessToken, {
+        secret: process.env.JWT_ACCESS_TOKEN_SECRET,
+      });
+    } catch (e) {
+      throw new BadRequestException('유효하지 않은 토큰입니다.');
+    }
+    return decodedJwt as Users;
   }
 
-  async validateRefreshToken(id: number, refreshToken: string) {
-    const user = await this.userRepository.findOne({
-      where: { id },
-      select: ['id', 'email', 'refreshToken'],
-    });
+  async validateRefreshToken(userId: number, refreshToken: string) {
+    const user: any = await this.userRepository
+      .createQueryBuilder('user')
+      .where('user.userId=:userId', { userId })
+      .getOne();
 
     const result = await bcrypt.compare(refreshToken, user.refreshToken);
     if (result) {
       const { refreshToken, ...userWithoutRefreshToken } = user;
-      console.log('userWithoutRefreshToken:', userWithoutRefreshToken);
+
       return userWithoutRefreshToken;
     }
   }
